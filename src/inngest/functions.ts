@@ -7,7 +7,7 @@ export const helloWorld = inngest.createFunction(
         // Create a new agent with a system prompt (you can add optional tools, too)
         const codeAgent = createAgent({
             name: "code-agent",
-            system: "You are an expert next.js developer, you write readable,maintanble code. you write simple Next.js & React snippets.",
+            system: "You are an expert Next.js developer, you write readable, maintainable code. You write simple Next.js & React snippets.",
             model: openai({ model: "gpt-4o", apiKey: process.env.OPEN_AI_API_KEY }),
         });
 
