@@ -1,25 +1,32 @@
 import { inngest } from "./client";
-import { openai, createAgent, createTool, createNetwork } from "@inngest/agent-kit";
+import { openai, createAgent, createTool, createNetwork, Tool } from "@inngest/agent-kit";
 import { Sandbox } from "@e2b/code-interpreter";
 import { getSandbox, lastAssistantTextMessageContent } from "./utils";
 import { z } from "zod";
-import { stderr, stdout } from "process";
 import { PROMPT } from "@/prompt";
-export const helloWorld = inngest.createFunction(
-    { id: "hello-world" },
-    { event: "test/hello.world" },
+import prisma from "@/lib/db";
+
+interface AgentState {
+    summary: string;
+    files: { [path: string]: string };
+
+}
+
+export const codeAgentFunction = inngest.createFunction(
+    { id: "code-agent" },
+    { event: "code-agent/run" },
     async ({ event, step }) => {
         const sandboxId = await step.run("get-sandbox-id", async () => {
             const sandbox = await Sandbox.create("vibe-nextjs-amirrezajm")
             return sandbox.sandboxId;
         })
         // Create a new agent with a system prompt (you can add optional tools, too)
-        const codeAgent = createAgent({
+        const codeAgent = createAgent<AgentState>({
             name: "code-agent",
-            description: "An expert Coding Agent",
-            system: PROMPT, 
+            description: "An expert coding agent",
+            system: PROMPT,
             // same tempature 
-            model: openai({ model: "gpt-4.1", defaultParameters: { temperature: 0.1 } , apiKey: process.env.OPEN_AI_API_KEY }),
+            model: openai({ model: "gpt-4.1", defaultParameters: { temperature: 0.1 }, apiKey: process.env.OPEN_AI_API_KEY }),
             tools: [
                 createTool({
                     name: "terminal",
@@ -45,7 +52,6 @@ export const helloWorld = inngest.createFunction(
                                 console.error(`Command failed: ${e} \nstdout: ${buffers.stdout} \nstderr: ${buffers.stderr}`)
                                 return `Command failed: ${e} \nstdout: ${buffers.stdout} \nstderr: ${buffers.stderr}`
                             }
-
                         })
 
                     }
@@ -61,7 +67,7 @@ export const helloWorld = inngest.createFunction(
                             })
                         ),
                     }),
-                    handler: async ({ files }, { step, network }) => {
+                    handler: async ({ files }, { step, network }: Tool.Options<AgentState>) => {
                         const newFiles = await step?.run("createOrUpdateFiles", async () => {
                             try {
                                 const updatedFiles = network.state.data.files || {};
@@ -70,6 +76,7 @@ export const helloWorld = inngest.createFunction(
                                     await sandbox.files.write(file.path, file.content);
                                     updatedFiles[file.path] = file.content;
                                 }
+                                return updatedFiles;
                             } catch (e) {
                                 return "Error:" + e;
                             }
@@ -104,10 +111,10 @@ export const helloWorld = inngest.createFunction(
                 })
             ],
             lifecycle: {
-                onResponse: async ({result,network}) => {
+                onResponse: async ({ result, network }) => {
                     const lastAssistantTextMessage = lastAssistantTextMessageContent(result)
-                    if(lastAssistantTextMessage && network) {
-                        if(lastAssistantTextMessage.includes("<task_summary>")) {
+                    if (lastAssistantTextMessage && network) {
+                        if (lastAssistantTextMessage.includes("<task_summary>")) {
                             network.state.data.summary = lastAssistantTextMessage
                         }
                     }
@@ -116,13 +123,13 @@ export const helloWorld = inngest.createFunction(
             }
         });
 
-        const network =  createNetwork({
+        const network = createNetwork<AgentState>({
             name: "coding-agent-network",
             agents: [codeAgent],
             maxIter: 15,
-            router: async ({network}) => {
+            router: async ({ network }) => {
                 const summary = network.state.data.summary;
-                if(summary) {
+                if (summary) {
                     return
                 }
                 return codeAgent;
@@ -132,12 +139,39 @@ export const helloWorld = inngest.createFunction(
 
         const result = await network.run(event.data.value);
 
+        const isError = !result.state.data.summary || Object.keys(result.state.data.files || {}).length === 0;
+
         const sandboxUrl = await step.run("get-sandbox-url", async () => {
             const sandbox = await getSandbox(sandboxId)
             const host = sandbox.getHost(3000);
             return `https://${host}`;
         })
-        return { 
+        await step.run("save-result", async () => {
+            if (isError) {
+                return await prisma.message.create({
+                    data: {
+                        content: "something went wrong, Please try again!",
+                        role: "ASSISTANT",
+                        type: "ERROR"
+                    }
+                })
+            };
+            return await prisma.message.create({
+                data: {
+                    content: result.state.data.summary,
+                    role: "ASSISTANT",
+                    type: "RESULT",
+                    fragment: {
+                        create: {
+                            sandboxUrl: sandboxUrl,
+                            title: "Fragment",
+                            files: result.state.data.files
+                        }
+                    }
+                }
+            })
+        })
+        return {
             url: sandboxUrl,
             title: "Fragment",
             files: result.state.data.files,
